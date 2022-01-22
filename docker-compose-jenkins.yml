@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+   db:
+     image: fr-jenkins-docker/jenkins:develop 
+     volumes:
+       - ./jenkins_home:/var/jenkins_home
+     ports:
+       - "8090:8080"
+       - "50001:50000"
+     restart: always
+

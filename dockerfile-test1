@@ -1,0 +1,89 @@
+FROM amazonlinux:2
+
+# --build-arg SSH_KEY="$(cat ~/.ssh/id_rsa)"
+ARG SSH_KEY
+# --build-arg ENVIRONMENT="staging"
+ARG ENVIRONMENT
+
+ENV GOPATH /go
+ENV PATH $GOPATH/bin:$PATH
+
+ENV GO111MODULE=on
+ENV GOPRIVATE github.com/fastretailing
+
+ENV ROOT_DIR /go/src/github.com/fastretailing/fr-ugc-api
+
+# Install dependencies
+# RUN yum -y update && \
+#    curl --silent --location https://rpm.nodesource.com/setup_12.x | bash - 
+
+RUN yum -y install nodejs golang-1.15.5-1.amzn2.0.2 git openssh-client zip && \
+    go get -u bitbucket.org/liamstask/goose/cmd/goose
+
+WORKDIR ${ROOT_DIR}
+
+COPY ./widget-sdk ./widget-sdk
+
+# Install and build front end dependencies
+RUN cd ./widget-sdk \
+    && npm install \
+    && npm run build
+
+COPY . ./
+
+# Ensure that the private Github repo is
+# accessed using SSH instead of HTTPS and install golang dependencies   
+RUN mkdir -p /root/.ssh && \
+    echo "$SSH_KEY" > /root/.ssh/id_rsa && \
+    chmod 0600 /root/.ssh/id_rsa && \
+    eval `ssh-agent` && \
+    ssh-add /root/.ssh/id_rsa && \
+    ssh-keyscan github.com >> /root/.ssh/known_hosts && \
+    echo '[url "ssh://git@github.com/fastretailing/"]' >> /root/.gitconfig && \
+    echo 'insteadOf = https://github.com/fastretailing/' >> /root/.gitconfig && \
+    export COMMON_VERSION=$(cat ./${ENVIRONMENT}.txt) && \
+    go mod download && \
+    go get -u github.com/fastretailing/fr-ugc-common@$COMMON_VERSION && \
+    cd .. && git clone --branch $COMMON_VERSION --depth=1 git@github.com:fastretailing/fr-ugc-common.git && \
+    go get github.com/fastretailing/fr-ugc-common/cmd/migration@$COMMON_VERSION && \
+    rm /root/.ssh/id_rsa
+
+# Install Application
+RUN ["go", "install", "."]
+
+FROM amazonlinux:2
+
+ARG APP_NAME=fr-ugc-api
+
+# Set Symantec Endpoint Protection(SEP) Installer zip file name.
+ARG SEPINSTALLER=SymantecEndpointProtection.zip
+
+RUN yum -y update && \
+    yum -y install which unzip glibc.i686 libgcc.i686 \
+    shadow-utils findutils && \
+    yum -y install make musl musl-dev musl-tools && \
+    yum clean all
+
+ENV PATH $PATH:/go/bin
+ENV ROOT_DIR /go/src/github.com/fastretailing/${APP_NAME}
+
+WORKDIR ${ROOT_DIR}
+
+COPY --from=0 ${ROOT_DIR} ${ROOT_DIR}
+COPY --from=0 /go/src/github.com/fastretailing/fr-ugc-common/migration ${ROOT_DIR}/migration
+COPY --from=0 /go/bin/migration /bin/
+COPY --from=0 /go/bin/goose /bin/
+COPY --from=0 /go/bin/${APP_NAME} /bin/
+COPY --from=0 /go/src/github.com/fastretailing/${APP_NAME}/SEP /tmp
+
+RUN mkdir -p /run/lock/subsys && \
+    unzip /tmp/${SEPINSTALLER} -d /opt/sepinst && \
+    chmod u+x /opt/sepinst/install.sh && \
+    (cd /opt/sepinst; ./install.sh -i 2>&1) && \
+    rm -f /tmp/${SEPINSTALLER} && \
+    chmod 744 ${ROOT_DIR}/docker-entrypoint.sh
+
+ENTRYPOINT ["/go/src/github.com/fastretailing/fr-ugc-api/docker-entrypoint.sh"]
+
+CMD migration -e $ENVIRONMENT -c fr-ugc-api -m DB_MIGRATE -d migration
+
